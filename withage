@@ -1,0 +1,222 @@
+{
+  "name": "Adherence Coach (Trusted Web + 2 AI Agents w/ Tool Access)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "adherence-coach",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "webhook-1",
+      "name": "Webhook",
+      "webhookId": "adherence-coach"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const t = (x) => (x ?? '').toString().trim().slice(0, 1000);\n  const n = (x) => Number.isFinite(Number(x)) ? Number(x) : 0;\n  const b = item.json || {};\n  return { json: { input: { text: t(b.text), missed_doses: n(b.missed_doses), symptoms: t(b.symptoms), concerns: t(b.concerns) } } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0],
+      "id": "code-normalize",
+      "name": "Normalize Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const input = item.json.input;\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"Classify medication-adherence barriers. Output JSON only: { \\\"barriers\\\": [labels], \\\"confidence\\\": 0..1 }. Labels: forgetfulness, fear_of_side_effects, cost, complex_regimen, low_motivation, low_health_literacy, access_issues, side_effects_present. Choose 1–3. Be conservative.\" },\n      { role: \"user\", content: `Patient input: ${JSON.stringify(input)}` }\n    ]\n  } } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, -120],
+      "id": "code-build-classifier",
+      "name": "Build Classifier Payload"
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "sendHeaders": true,
+        "headerParametersUi": {
+          "parameter": [
+            { "name": "Authorization", "value": "Bearer {{$env.OPENAI_API_KEY}}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [700, -120],
+      "id": "http-classifier",
+      "name": "HTTP: Classifier"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const raw = item.json?.choices?.[0]?.message?.content || '{}';\n  let parsed; try { parsed = JSON.parse(raw) } catch { parsed = {} }\n  const barriers = Array.isArray(parsed.barriers) ? parsed.barriers.slice(0,3) : [];\n  const confidence = Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0;\n  return { json: { barriers, confidence } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [940, -120],
+      "id": "code-parse-classifier",
+      "name": "Parse Classifier JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const KB = {\n    fear_of_side_effects: [\n      \"Keep a brief symptom diary to discuss specifics with your clinician.\",\n      \"Practice a 2-minute breathing exercise before your dose.\",\n      \"Use trusted sources (CDC/FDA) rather than random searches.\",\n      \"If concerned, note it, continue routine, and contact your clinician if it persists.\"\n    ],\n    forgetfulness: [\n      \"Set recurring phone alarms at dose times.\",\n      \"Pair your dose with a daily routine (brushing teeth/breakfast).\",\n      \"Use a weekly pillbox in a visible place.\"\n    ],\n    low_motivation: [\n      \"Track adherence and give yourself a small weekly reward.\",\n      \"Link the dose to a personal goal (e.g., more energy for family).\",\n      \"Use short positive self-talk.\"\n    ],\n    complex_regimen: [\n      \"Use a pill organizer labeled by time of day.\",\n      \"Post a simple schedule where you can see it daily.\",\n      \"Ask your clinician/pharmacist whether timing can be simplified.\"\n    ]\n  };\n  const labels = item.json.barriers || [];\n  const out = [];\n  for (const b of labels) (KB[b]||[]).forEach(s => out.push({ text: s, source: \"kb\" }));\n  return { json: { candidates_kb: out } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, -200],
+      "id": "code-load-kb",
+      "name": "Load KB (Pre-approved)"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [2380, 120],
+      "id": "http-tool",
+      "name": "HTTP Request Tool"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ 'Candidates: ' + JSON.stringify($json.candidates || []) + '\\nTrusted sources (user): ' + JSON.stringify($node[\"Webhook\"].json.trusted_sources || []) + '\\nAllowed domains: ' + JSON.stringify(['cdc.gov','nih.gov','ncbi.nlm.nih.gov','who.int','heart.org','diabetes.org']) }}",
+        "options": {
+          "systemMessage": "You are a Behavioral Strategist AI for medication adherence.\\nUse ONLY from provided candidates and optionally strategies extracted from trusted pages.\\nTOOL POLICY:\\n- You may call the HTTP Request Tool to fetch pages ONLY if the URL host is in the Allowed domains.\\n- If the user provided trusted_sources, use ONLY those among the allowed domains.\\n- If none are provided and confidence is low, you MAY fetch from CDC/NIH with concise queries.\\n- Never fetch or summarize non-allowed domains.\\nSAFETY:\\n- Extract behavioral tactics only (no dosing/timing/mg). No clinical directives.\\nOUTPUT (strict JSON only): { \\\"final_strategies\\\": [\\\"...\\\"] }"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [2620, -80],
+      "id": "agent-strategist",
+      "name": "AI Agent: Strategist"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [2620, 120],
+      "id": "model-strategist",
+      "name": "OpenAI Chat Model (Strategist)"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [2780, 120],
+      "id": "memory-strategist",
+      "name": "Simple Memory (Strategist)"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ JSON.stringify($json) }}",
+        "options": {
+          "systemMessage": "You are a Reasoning/Safety AI. Validate and phrase the selected strategies empathetically. Remove anything unsafe or impractical; never give dosing/timing/mg instructions. Output strict JSON: { \\\"message\\\": \\\"...\\\", \\\"barriers\\\": [], \\\"strategies\\\": [], \\\"confidence\\\": 0.0 }"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [3260, -80],
+      "id": "agent-reasoner",
+      "name": "AI Agent: Reasoner"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [3260, 120],
+      "id": "model-reasoner",
+      "name": "OpenAI Chat Model (Reasoner)"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [3420, 120],
+      "id": "memory-reasoner",
+      "name": "Simple Memory (Reasoner)"
+    },
+    {
+      "parameters": {
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 2,
+      "position": [3500, -80],
+      "id": "respond-1",
+      "name": "Respond"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Normalize Input", "type": "main", "index": 0 }]]
+    },
+    "Normalize Input": {
+      "main": [[{ "node": "Build Classifier Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Classifier Payload": {
+      "main": [[{ "node": "HTTP: Classifier", "type": "main", "index": 0 }]]
+    },
+    "HTTP: Classifier": {
+      "main": [[{ "node": "Parse Classifier JSON", "type": "main", "index": 0 }]]
+    },
+    "Parse Classifier JSON": {
+      "main": [
+        [{ "node": "Load KB (Pre-approved)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Load KB (Pre-approved)": {
+      "main": [[{ "node": "AI Agent: Strategist", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat Model (Strategist)": {
+      "ai_languageModel": [[{ "node": "AI Agent: Strategist", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Simple Memory (Strategist)": {
+      "ai_memory": [[{ "node": "AI Agent: Strategist", "type": "ai_memory", "index": 0 }]]
+    },
+    "HTTP Request Tool": {
+      "ai_tool": [[{ "node": "AI Agent: Strategist", "type": "ai_tool", "index": 0 }]]
+    },
+    "AI Agent: Strategist": {
+      "main": [[{ "node": "AI Agent: Reasoner", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat Model (Reasoner)": {
+      "ai_languageModel": [[{ "node": "AI Agent: Reasoner", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Simple Memory (Reasoner)": {
+      "ai_memory": [[{ "node": "AI Agent: Reasoner", "type": "ai_memory", "index": 0 }]]
+    },
+    "AI Agent: Reasoner": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "trusted-web-2agents-tools",
+  "meta": { "instanceId": "replace-with-your-instance-id" },
+  "id": "AdherenceCoach-TrustedWeb-2Agents-Tools",
+  "tags": []
+}
