@@ -1,38 +1,38 @@
 {
-  "name": "Adherence Coach (Core HTTP + Trusted Web)",
+  "name": "Adherence Coach (Core HTTP + Trusted Web • Code Nodes)",
   "nodes": [
     {
       "parameters": {
+        "httpMethod": "POST",
         "path": "adherence-coach",
-        "options": {
-          "response": "Using 'Respond to Webhook' node"
-        }
+        "options": {}
       },
-      "id": "Webhook",
-      "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
-      "typeVersion": 1,
-      "position": [220, 200]
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "webhook-1",
+      "name": "Webhook",
+      "webhookId": "adherence-coach"
     },
     {
       "parameters": {
-        "functionCode": "const t = (x)=> (x ?? '').toString().trim().slice(0,1000);\nconst n = (x)=> Number.isFinite(Number(x)) ? Number(x) : 0;\nconst body = $json;\nreturn [{ input: { text: t(body.text), missed_doses: n(body.missed_doses), symptoms: t(body.symptoms), concerns: t(body.concerns) } }];"
+        "jsCode": "return items.map(item => {\n  const t = (x) => (x ?? '').toString().trim().slice(0, 1000);\n  const n = (x) => Number.isFinite(Number(x)) ? Number(x) : 0;\n  const b = item.json || {};\n  return { json: { input: { text: t(b.text), missed_doses: n(b.missed_doses), symptoms: t(b.symptoms), concerns: t(b.concerns) } } };\n});"
       },
-      "id": "Normalize",
-      "name": "Normalize Input",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [470, 200]
+      "position": [220, 0],
+      "id": "code-normalize",
+      "name": "Normalize Input"
     },
     {
       "parameters": {
-        "functionCode": "// Build OpenAI chat payload for barrier classifier\nconst input = $json.input;\nconst payload = {\n  model: \"gpt-4o-mini\",\n  response_format: { type: \"json_object\" },\n  temperature: 0.2,\n  messages: [\n    { role: \"system\", content: \"You classify medication-adherence barriers. Output JSON only: { \\\"barriers\\\": [<labels>], \\\"confidence\\\": <0..1> } Labels: forgetfulness, fear_of_side_effects, cost, complex_regimen, low_motivation, low_health_literacy, access_issues, side_effects_present. Choose 1–3. Be conservative. No extra text.\" },\n    { role: \"user\", content: `Patient input:\\n${JSON.stringify(input)}` }\n  ]\n};\nreturn [{ payload }];"
+        "jsCode": "return items.map(item => {\n  const input = item.json.input;\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"Classify medication-adherence barriers. Output JSON only: { \\\"barriers\\\": [labels], \\\"confidence\\\": 0..1 }. Labels: forgetfulness, fear_of_side_effects, cost, complex_regimen, low_motivation, low_health_literacy, access_issues, side_effects_present. Choose 1–3. Be conservative.\" },\n      { role: \"user\", content: `Patient input: ${JSON.stringify(input)}` }\n    ]\n  } } };\n});"
       },
-      "id": "BuildClassifierPayload",
-      "name": "Build Classifier Payload",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [700, 120]
+      "position": [460, -120],
+      "id": "code-build-classifier",
+      "name": "Build Classifier Payload"
     },
     {
       "parameters": {
@@ -48,81 +48,77 @@
           ]
         },
         "sendBody": true,
-        "bodyParametersJson": "={{JSON.stringify($json.payload)}}"
+        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
       },
-      "id": "HTTPClassifier",
-      "name": "HTTP: Classifier",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [950, 120]
+      "position": [700, -120],
+      "id": "http-classifier",
+      "name": "HTTP: Classifier"
     },
     {
       "parameters": {
-        "functionCode": "const raw = $json?.choices?.[0]?.message?.content || '{}';\nlet parsed = {};\ntry { parsed = JSON.parse(raw); } catch(e) { parsed = { barriers: [], confidence: 0 }; }\nreturn [{ barriers: parsed.barriers || [], confidence: parsed.confidence ?? 0 }];"
+        "jsCode": "return items.map(item => {\n  const raw = item.json?.choices?.[0]?.message?.content || '{}';\n  let parsed; try { parsed = JSON.parse(raw) } catch { parsed = {} }\n  const barriers = Array.isArray(parsed.barriers) ? parsed.barriers.slice(0,3) : [];\n  const confidence = Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0;\n  return { json: { barriers, confidence } };\n});"
       },
-      "id": "ParseClassifier",
-      "name": "Parse Classifier JSON",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1200, 120]
+      "position": [940, -120],
+      "id": "code-parse-classifier",
+      "name": "Parse Classifier JSON"
     },
     {
       "parameters": {
-        "functionCode": "/* Pre-approved KB; extend as needed */\nconst KB = {\n  fear_of_side_effects: [\n    \"Keep a brief symptom diary to discuss specifics with your clinician.\",\n    \"Practice a 2-minute breathing exercise before your dose.\",\n    \"Use trusted sources (FDA/CDC) rather than random searches.\",\n    \"If concerned, make an 'if-then' plan: note it, continue routine, contact clinician if it persists.\"\n  ],\n  forgetfulness: [\n    \"Set recurring phone alarms at dose times.\",\n    \"Pair your dose with a daily routine (brushing teeth, breakfast).\",\n    \"Use a weekly pillbox kept in a visible place.\"\n  ],\n  low_motivation: [\n    \"Track adherence in a simple app and reward weekly consistency.\",\n    \"Link the dose to a personal goal (e.g., more energy for family).\",\n    \"Use positive self-talk; remind yourself why staying on track matters.\"\n  ],\n  complex_regimen: [\n    \"Use a pill organizer divided by time of day.\",\n    \"Post a simple schedule where you can see it daily.\",\n    \"Ask your clinician/pharmacist about simplifying timing (appointment needed).\"\n  ]\n};\n\nconst labels = $json.barriers || [];\nconst out = [];\nfor (const b of labels) (KB[b]||[]).forEach(s => out.push({ text: s, source: \"kb\" }));\nreturn [{ candidates_kb: out, barriers: labels, input: $node[\"Normalize Input\"].json.input }];"
+        "jsCode": "return items.map(item => {\n  const KB = {\n    fear_of_side_effects: [\n      \"Keep a brief symptom diary to discuss specifics with your clinician.\",\n      \"Practice a 2-minute breathing exercise before your dose.\",\n      \"Use trusted sources (CDC/FDA) rather than random searches.\",\n      \"If concerned, note it, continue routine, and contact your clinician if it persists.\"\n    ],\n    forgetfulness: [\n      \"Set recurring phone alarms at dose times.\",\n      \"Pair your dose with a daily routine (brushing teeth/breakfast).\",\n      \"Use a weekly pillbox in a visible place.\"\n    ],\n    low_motivation: [\n      \"Track adherence and give yourself a small weekly reward.\",\n      \"Link the dose to a personal goal (e.g., more energy for family).\",\n      \"Use short positive self-talk.\"\n    ],\n    complex_regimen: [\n      \"Use a pill organizer labeled by time of day.\",\n      \"Post a simple schedule where you can see it daily.\",\n      \"Ask your clinician/pharmacist whether timing can be simplified.\"\n    ]\n  };\n  const labels = item.json.barriers || [];\n  const out = [];\n  for (const b of labels) (KB[b]||[]).forEach(s => out.push({ text: s, source: \"kb\" }));\n  return { json: { candidates_kb: out } };\n});"
       },
-      "id": "LoadKB",
-      "name": "Load KB (Pre-approved)",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1450, 60]
+      "position": [1180, -200],
+      "id": "code-load-kb",
+      "name": "Load KB (Pre-approved)"
     },
     {
       "parameters": {
         "url": "https://www.cdc.gov/search/?query=medication%20adherence%20{{$node[\"Parse Classifier JSON\"].json.barriers?.[0] || 'tips'}}",
         "responseFormat": "string",
-        "options": {
-          "fullResponse": true
-        }
+        "options": { "fullResponse": true }
       },
-      "id": "CDCSearch",
-      "name": "HTTP: CDC Search",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [1450, 260]
+      "position": [1180, -20],
+      "id": "http-cdc",
+      "name": "HTTP: CDC Search"
     },
     {
       "parameters": {
         "url": "https://search.nih.gov/search?utf8=%E2%9C%93&affiliate=nih&query=medication%20adherence%20{{$node[\"Parse Classifier JSON\"].json.barriers?.[0] || 'tips'}}",
         "responseFormat": "string",
-        "options": {
-          "fullResponse": true
-        }
+        "options": { "fullResponse": true }
       },
-      "id": "NIHSearch",
-      "name": "HTTP: NIH Search",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [1450, 380]
+      "position": [1180, 120],
+      "id": "http-nih",
+      "name": "HTTP: NIH Search"
     },
     {
       "parameters": {
-        "functionCode": "/* Collect short extracts from CDC/NIH search pages (simple HTML strip) */\nfunction strip(html){return String(html||'').replace(/<script[\\s\\S]*?<\\/script>/gi,'').replace(/<style[\\s\\S]*?<\\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim().slice(0,4000);} \nconst chunks = [];\nconst cdc = $items(\"HTTP: CDC Search\");\nconst nih = $items(\"HTTP: NIH Search\");\nfor (const i of cdc) chunks.push({domain:\"cdc.gov\", text: strip(i.json?.body || i.json || i.binary?.data || \"\")});\nfor (const i of nih) chunks.push({domain:\"nih.gov\", text: strip(i.json?.body || i.json || i.binary?.data || \"\")});\nreturn [{ webText: chunks }];"
+        "jsCode": "function strip(html){return String(html||'').replace(/<script[\\s\\S]*?<\\/script>/gi,'').replace(/<style[\\s\\S]*?<\\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim().slice(0,4000);} \nconst all = $input.all();\nconst chunks = [];\nfor (const inb of all){\n  const b = inb.json || {};\n  const body = b.body || b;\n  const text = strip(body);\n  if (inb.node.name.includes('CDC')) chunks.push({domain:'cdc.gov', text});\n  if (inb.node.name.includes('NIH')) chunks.push({domain:'nih.gov', text});\n}\nreturn [{ json: { webText: chunks } }];"
       },
-      "id": "CollectWebText",
-      "name": "Collect Web Text",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1700, 320]
+      "position": [1420, 50],
+      "id": "code-collect-web",
+      "name": "Collect Web Text"
     },
     {
       "parameters": {
-        "functionCode": "// Build extractor payload (LLM will pull behavioral tactics only)\nconst extracts = $json.webText || [];\nconst payload = {\n  model: \"gpt-4o-mini\",\n  response_format: { type: \"json_object\" },\n  temperature: 0.2,\n  messages: [\n    { role: \"system\", content: \"You extract behavioral strategies that help medication adherence from supplied text. Return only practical behavioral tactics (no dosing/medical instructions). Output strict JSON: { \\\\\\\"strategies\\\\\\\": [\\\\\\\"...\\\\\\\", \\\\\\\"...\\\\\\\"] }\" },\n    { role: \"user\", content: `Trusted extracts (CDC/NIH):\\n${JSON.stringify(extracts)}` }\n  ]\n};\nreturn [{ payload }];"
+        "jsCode": "return items.map(item => {\n  const extracts = item.json.webText || [];\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"Extract behavioral adherence strategies (non-medical) from provided text. Output JSON only: {\\\\\"strategies\\\\\":[..]}\" },\n      { role: \"user\", content: `Trusted extracts: ${JSON.stringify(extracts)}` }\n    ]\n  } } };\n});"
       },
-      "id": "BuildExtractorPayload",
-      "name": "Build Extractor Payload",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1940, 320]
+      "position": [1660, 50],
+      "id": "code-build-extractor",
+      "name": "Build Extractor Payload"
     },
     {
       "parameters": {
@@ -138,43 +134,43 @@
           ]
         },
         "sendBody": true,
-        "bodyParametersJson": "={{JSON.stringify($json.payload)}}"
+        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
       },
-      "id": "HTTPExtractor",
-      "name": "HTTP: Web Strategy Extractor",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [2180, 320]
+      "position": [1900, 50],
+      "id": "http-extractor",
+      "name": "HTTP: Web Strategy Extractor"
     },
     {
       "parameters": {
-        "functionCode": "const raw = $json?.choices?.[0]?.message?.content || '{}';\nlet parsed = {};\ntry { parsed = JSON.parse(raw); } catch(e) { parsed = { strategies: [] }; }\nconst out = (parsed.strategies || []).map(s => ({ text: String(s), source: \"web\" }));\nreturn [{ candidates_web: out }];"
+        "jsCode": "return items.map(item => {\n  const raw = item.json?.choices?.[0]?.message?.content || '{}';\n  let parsed; try { parsed = JSON.parse(raw) } catch { parsed = {} }\n  const arr = Array.isArray(parsed.strategies) ? parsed.strategies : [];\n  return { json: { candidates_web: arr.map(s => ({ text: String(s), source: 'web' })) } };\n});"
       },
-      "id": "MapWebCandidates",
-      "name": "Map Web Candidates",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2420, 320]
+      "position": [2140, 50],
+      "id": "code-map-web",
+      "name": "Map Web Candidates"
     },
     {
       "parameters": {
-        "functionCode": "/* Merge KB + Web; dedupe; guardrails; rank */\nconst kbItems = $items(\"Load KB (Pre-approved)\").map(i => i.json.candidates_kb || []).flat();\nconst webItems = $items(\"Map Web Candidates\").map(i => i.json.candidates_web || []).flat();\nconst all = [...kbItems, ...webItems];\n\n// Deduplicate\nconst seen = new Set();\nconst dedup = [];\nfor (const c of all) {\n  const key = (c.text || '').toLowerCase().trim();\n  if (!key || seen.has(key)) continue;\n  seen.add(key);\n  dedup.push(c);\n}\n\n// Guardrails\nconst banned = /double dose|skip dose|increase dose|decrease dose|\\bmg\\b|milligram|store in unsafe/i;\nconst whitelist = /(cdc\\.gov|who\\.int|nih\\.gov|ncbi\\.nlm\\.nih\\.gov|heart\\.org|diabetes\\.org)/i;\nconst safe = dedup.filter(c => !banned.test(c.text));\n\n// Score\nfor (const c of safe) {\n  c.score = 0;\n  if (c.source === 'kb') c.score += 2;\n  if (whitelist.test(c.source || '')) c.score += 1;\n}\n\nsafe.sort((a,b)=> b.score - a.score);\nconst top = safe.slice(0, 8);\n\n// Carry forward barriers + input for Strategist\nconst barriersNode = $items(\"Parse Classifier JSON\")[0]?.json;\nconst inputNode = $items(\"Normalize Input\")[0]?.json?.input;\nreturn [{ candidates: top, barriers: (barriersNode?.barriers || []), input: inputNode }];"
+        "jsCode": "const inputs = $input.all();\nconst kb = (inputs.find(i => i.node.name.includes('Load KB'))?.json.candidates_kb) || [];\nconst web = (inputs.find(i => i.node.name.includes('Map Web'))?.json.candidates_web) || [];\nconst all = [...kb, ...web];\nconst seen = new Set();\nconst dedup = [];\nfor (const c of all){ const k=(c.text||'').toLowerCase().trim(); if(!k||seen.has(k)) continue; seen.add(k); dedup.push(c); }\nconst banned=/double dose|skip dose|increase dose|decrease dose|\\bmg\\b|milligram|store in unsafe/i;\nconst safe = dedup.filter(c => !banned.test(c.text));\nsafe.forEach(c=> c.score = (c.source==='kb'?2:1));\nsafe.sort((a,b)=> b.score-a.score);\nreturn [{ json: { candidates: safe.slice(0,8) } }];"
       },
-      "id": "MergeGuard",
-      "name": "Merge + Guard",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2660, 190]
+      "position": [2380, -80],
+      "id": "code-merge-guard",
+      "name": "Merge + Guard"
     },
     {
       "parameters": {
-        "functionCode": "// Build strategist payload using candidates\nconst data = $json;\nconst payload = {\n  model: \"gpt-4o-mini\",\n  response_format: { type: \"json_object\" },\n  temperature: 0.6,\n  messages: [\n    { role: \"system\", content: \"You are a Behavioral Strategist AI for medication adherence. Use ONLY the provided candidate strategies. Do not invent medical/dosing advice. Choose the 2–3 best for the detected barriers and the user's context. Personalize wording; keep supportive and practical. Return JSON: { \\\"final_strategies\\\": [ \\\"...\\\" ] }\" },\n    { role: \"user\", content: `Barriers: ${JSON.stringify(data.barriers)}\\nCandidates: ${JSON.stringify(data.candidates)}\\nPatient context: ${JSON.stringify(data.input)}` }\n  ]\n};\nreturn [{ payload }];"
+        "jsCode": "return items.map(item => {\n  const data = item.json;\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.6,\n    messages: [\n      { role: \"system\", content: \"You are a Behavioral Strategist AI for medication adherence. Use ONLY from provided candidates. Choose 2–3. No medical/dosing advice. Output JSON only: {\\\\\"final_strategies\\\\\":[..]}\" },\n      { role: \"user\", content: `Candidates: ${JSON.stringify(data.candidates)}` }\n    ]\n  } } };\n});"
       },
-      "id": "BuildStrategistPayload",
-      "name": "Build Strategist Payload",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2900, 190]
+      "position": [2620, -80],
+      "id": "code-build-strategist",
+      "name": "Build Strategist Payload"
     },
     {
       "parameters": {
@@ -190,57 +186,43 @@
           ]
         },
         "sendBody": true,
-        "bodyParametersJson": "={{JSON.stringify($json.payload)}}"
+        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
       },
-      "id": "HTTPStrategist",
-      "name": "HTTP: Strategist",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [3130, 190]
+      "position": [2860, -80],
+      "id": "http-strategist",
+      "name": "HTTP: Strategist"
     },
     {
       "parameters": {
-        "functionCode": "const raw = $json?.choices?.[0]?.message?.content || '{}';\nlet parsed = {};\ntry { parsed = JSON.parse(raw); } catch(e) { parsed = { final_strategies: [] }; }\nreturn [{ final_strategies: parsed.final_strategies || [] }];"
+        "jsCode": "return items.map(item => {\n  let parsed={}; try{ parsed = JSON.parse(item.json?.choices?.[0]?.message?.content || '{}') } catch {}\n  const picks = Array.isArray(parsed.final_strategies) ? parsed.final_strategies.slice(0,3) : [];\n  return { json: { final_strategies: picks } };\n});"
       },
-      "id": "ParseStrategist",
-      "name": "Parse Strategist JSON",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3360, 190]
+      "position": [3100, -80],
+      "id": "code-parse-strategist",
+      "name": "Parse Strategist JSON"
     },
     {
       "parameters": {
-        "conditions": {
-          "boolean": [
-            { "value1": "={{Array.isArray($json.final_strategies) && $json.final_strategies.length>0}}", "operation": "isTrue" }
-          ]
-        }
+        "jsCode": "const all = $input.all();\nconst chosen = (all.find(i=>i.node.name.includes('Parse Strategist'))?.json.final_strategies) || [];\nif (chosen.length>0) return [{ json: { final_strategies: chosen } }];\nconst candidates = (all.find(i=>i.node.name.includes('Merge + Guard'))?.json.candidates) || [];\nreturn [{ json: { final_strategies: candidates.slice(0,2).map(c=>c.text) } }];"
       },
-      "id": "SchemaCheck",
-      "name": "Schema Check",
-      "type": "n8n-nodes-base.if",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3580, 190]
+      "position": [3340, -80],
+      "id": "code-pick-fallback",
+      "name": "Pick (with Fallback)"
     },
     {
       "parameters": {
-        "functionCode": "/* Fallback: take top 2 candidates if strategist failed */\nconst merge = $node[\"Merge + Guard\"].json;\nconst picks = (merge.candidates || []).slice(0,2).map(c => c.text);\nreturn [{ final_strategies: picks }];"
+        "jsCode": "return items.map(item => {\n  const selected = item.json.final_strategies || [];\n  return { json: { payload: {\n    model: \"gpt-4o\",\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"You are a Reasoning/Safety AI. Validate and phrase selected strategies empathetically. No dosing or clinical instructions. Output short plain text.\" },\n      { role: \"user\", content: `Selected strategies: ${JSON.stringify(selected)}` }\n    ]\n  } } };\n});"
       },
-      "id": "FallbackPicks",
-      "name": "Fallback Picks",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3580, 330]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Build reasoner payload (plain text output)\nconst input = $node[\"Normalize Input\"].json.input;\nconst barriers = $node[\"Parse Classifier JSON\"].json;\nconst selected = $json.final_strategies;\nconst payload = {\n  model: \"gpt-4o\",\n  temperature: 0.2,\n  messages: [\n    { role: \"system\", content: \"You are a Reasoning/Safety AI. Validate the selected strategies for safety, feasibility, and fit. Remove anything unsafe or impractical; be empathetic and clear. No dosing or clinical instructions. Encourage clinician contact for medical concerns. Return a short patient-ready message (plain text).\" },\n    { role: \"user\", content: `Patient input:\\n${JSON.stringify(input)}\\n\\nBarriers:\\n${JSON.stringify(barriers)}\\n\\nSelected strategies:\\n${JSON.stringify(selected)}` }\n  ]\n};\nreturn [{ payload }];"
-      },
-      "id": "BuildReasonerPayload",
-      "name": "Build Reasoner Payload",
-      "type": "n8n-nodes-base.function",
-      "typeVersion": 2,
-      "position": [3800, 190]
+      "position": [3580, -80],
+      "id": "code-build-reasoner",
+      "name": "Build Reasoner Payload"
     },
     {
       "parameters": {
@@ -256,36 +238,34 @@
           ]
         },
         "sendBody": true,
-        "bodyParametersJson": "={{JSON.stringify($json.payload)}}"
+        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
       },
-      "id": "HTTPReasoner",
-      "name": "HTTP: Reasoner",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [4030, 190]
+      "position": [3820, -80],
+      "id": "http-reasoner",
+      "name": "HTTP: Reasoner"
     },
     {
       "parameters": {
-        "functionCode": "const text = $json?.choices?.[0]?.message?.content || \"\";\nreturn [{ message: text }];"
+        "jsCode": "return items.map(item => ({ json: { message: (item.json?.choices?.[0]?.message?.content || '').toString() } }));"
       },
-      "id": "ExtractText",
-      "name": "Extract Final Text",
-      "type": "n8n-nodes-base.function",
+      "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [4260, 190]
+      "position": [4060, -80],
+      "id": "code-extract-text",
+      "name": "Extract Final Text"
     },
     {
       "parameters": {
-        "responseBody": "={{$json}}",
-        "options": {
-          "responseCode": 200
-        }
+        "responseBody": "={{ $json }}",
+        "options": {}
       },
-      "id": "Respond",
-      "name": "Respond to Webhook",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 2,
-      "position": [4490, 190]
+      "position": [4300, -80],
+      "id": "respond-1",
+      "name": "Respond"
     }
   ],
   "connections": {
@@ -303,11 +283,9 @@
     },
     "Parse Classifier JSON": {
       "main": [
-        [
-          { "node": "Load KB (Pre-approved)", "type": "main", "index": 0 },
-          { "node": "HTTP: CDC Search", "type": "main", "index": 0 },
-          { "node": "HTTP: NIH Search", "type": "main", "index": 0 }
-        ]
+        [{ "node": "Load KB (Pre-approved)", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: CDC Search", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: NIH Search", "type": "main", "index": 0 }]
       ]
     },
     "HTTP: CDC Search": {
@@ -341,15 +319,9 @@
       "main": [[{ "node": "Parse Strategist JSON", "type": "main", "index": 0 }]]
     },
     "Parse Strategist JSON": {
-      "main": [[{ "node": "Schema Check", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Pick (with Fallback)", "type": "main", "index": 0 }]]
     },
-    "Schema Check": {
-      "main": [
-        [{ "node": "Build Reasoner Payload", "type": "main", "index": 0 }],
-        [{ "node": "Fallback Picks", "type": "main", "index": 0 }]
-      ]
-    },
-    "Fallback Picks": {
+    "Pick (with Fallback)": {
       "main": [[{ "node": "Build Reasoner Payload", "type": "main", "index": 0 }]]
     },
     "Build Reasoner Payload": {
@@ -359,7 +331,15 @@
       "main": [[{ "node": "Extract Final Text", "type": "main", "index": 0 }]]
     },
     "Extract Final Text": {
-      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
     }
-  }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "core-http-trusted-web-code",
+  "meta": {
+    "instanceId": "replace-with-your-instance-id"
+  },
+  "id": "AdherenceCoach-CoreHTTP-TrustedWeb-Code",
+  "tags": []
 }
