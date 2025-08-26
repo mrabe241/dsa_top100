@@ -1,0 +1,413 @@
+{
+  "name": "Adherence Coach (Classifier + KB + Trusted Web + Strategist + Reasoner)",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "adherence-coach",
+        "options": {
+          "response": "Using 'Respond to Webhook' node",
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "Webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [220, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const t = (x)=> (x ?? '').toString().trim().slice(0,1000);\nconst n = (x)=> Number.isFinite(Number(x)) ? Number(x) : 0;\nconst body = $json;\nreturn [{\n  input: {\n    text: t(body.text),\n    missed_doses: n(body.missed_doses),\n    symptoms: t(body.symptoms),\n    concerns: t(body.concerns)\n  }\n}];"
+      },
+      "id": "NormalizeInput",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "You classify medication-adherence barriers. Output JSON only:\n{ \"barriers\": [<labels>], \"confidence\": <0..1> }\nLabels: forgetfulness, fear_of_side_effects, cost, complex_regimen, low_motivation, low_health_literacy, access_issues, side_effects_present.\nChoose 1–3. Be conservative. No extra text.",
+        "messages": [
+          {
+            "text": "Patient input:\n{{$json[\"input\"]}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json"
+      },
+      "id": "BarrierClassifier",
+      "name": "OpenAI: Barrier Classifier",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 4,
+      "position": [730, 200],
+      "credentials": {
+        "openAIApi": {
+          "id": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Inline pre-approved strategy KB; replace/expand as needed */\nconst KB = {\n  fear_of_side_effects: [\n    \"Keep a short symptom diary to share specifics with your clinician.\",\n    \"Practice a 2-minute breathing exercise before your dose.\",\n    \"Use trusted sources (FDA/CDC) rather than random searches.\",\n    \"Plan: note symptoms, continue routine, contact clinician if concerns persist.\"\n  ],\n  forgetfulness: [\n    \"Set recurring phone alarms at dose times.\",\n    \"Pair your dose with brushing teeth or breakfast.\",\n    \"Use a weekly pillbox kept in a visible place.\"\n  ],\n  low_motivation: [\n    \"Track adherence in a simple app and reward weekly consistency.\",\n    \"Link the dose to a personal goal (e.g., more energy for family).\",\n    \"Use positive self-talk; remind yourself why staying on track matters.\"\n  ],\n  complex_regimen: [\n    \"Use a pill organizer divided by time of day.\",\n    \"Post a simple schedule where you can see it daily.\",\n    \"Ask your clinician/pharmacist about simplifying timing (appointment needed).\"\n  ]\n};\n\nconst result = $json; // classifier JSON\nconst labels = result.barriers?.barriers || result.barriers || [];\nconst out = [];\nfor (const b of labels) {\n  const items = KB[b] || [];\n  for (const s of items) out.push({ text: s, source: \"kb\" });\n}\nreturn [{ candidates_kb: out, barriers: labels }];"
+      },
+      "id": "LoadKB",
+      "name": "Load KB (Pre-approved)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [990, 110]
+    },
+    {
+      "parameters": {
+        "url": "https://www.cdc.gov/search/?query=medication%20adherence%20{{$json.barriers?.[0] || 'tips'}}",
+        "responseFormat": "string",
+        "options": {
+          "fullResponse": true
+        }
+      },
+      "id": "CDCSearch",
+      "name": "HTTP: CDC Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [990, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://search.nih.gov/search?utf8=%E2%9C%93&affiliate=nih&query=medication%20adherence%20{{$json.barriers?.[0] || 'tips'}}",
+        "responseFormat": "string",
+        "options": {
+          "fullResponse": true
+        }
+      },
+      "id": "NIHSearch",
+      "name": "HTTP: NIH Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [990, 430]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Collect a short extract from CDC/NIH search responses */\nfunction strip(html){return html.replace(/<script[\\s\\S]*?<\\/script>/gi,'').replace(/<style[\\s\\S]*?<\\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim().slice(0,4000);} \nconst chunks = [];\nconst cdc = $items(\"HTTP: CDC Search\");\nconst nih = $items(\"HTTP: NIH Search\");\nfor (const i of cdc) chunks.push({domain:\"cdc.gov\", text: strip(i.json?.body || i.json || i.binary?.data || \"\")});\nfor (const i of nih) chunks.push({domain:\"nih.gov\", text: strip(i.json?.body || i.json || i.binary?.data || \"\")});\nreturn [{ webText: chunks }];"
+      },
+      "id": "CollectWebText",
+      "name": "Collect Web Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1240, 365]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "You extract behavioral strategies that help medication adherence from supplied text. Return only practical behavioral tactics (no dosing/medical instructions). Output strict JSON: { \"strategies\": [\"...\", \"...\"] }",
+        "messages": [
+          {
+            "text": "From the following trusted extracts, pull behavioral adherence strategies (2–8 items):\n{{$json[\"webText\"]}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json"
+      },
+      "id": "WebExtractor",
+      "name": "OpenAI: Web Strategy Extractor",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 4,
+      "position": [1490, 365],
+      "credentials": {
+        "openAIApi": {
+          "id": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Map extractor output to candidate list with source */\nconst out = [];\nconst item = $json;\nconst arr = item.strategies || item.candidates_web || [];\nfor (const s of arr) out.push({ text: (s.text || s).toString(), source: \"web\" });\nreturn [{ candidates_web: out }];"
+      },
+      "id": "MapWebCandidates",
+      "name": "Map Web Candidates",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1740, 365]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Merge KB + Web; dedupe; guardrails; rank */\nconst kbItems = $items(\"Load KB (Pre-approved)\").map(i => i.json.candidates_kb || []).flat();\nconst webItems = $items(\"Map Web Candidates\").map(i => i.json.candidates_web || []).flat();\nconst all = [...kbItems, ...webItems];\n\n// Deduplicate\nconst seen = new Set();\nconst dedup = [];\nfor (const c of all) {\n  const key = (c.text || '').toLowerCase().trim();\n  if (!key || seen.has(key)) continue;\n  seen.add(key);\n  dedup.push(c);\n}\n\n// Guardrails\nconst banned = /double dose|skip dose|increase dose|decrease dose|\\bmg\\b|milligram|store in unsafe/i;\nconst whitelist = /(cdc\\.gov|who\\.int|nih\\.gov|ncbi\\.nlm\\.nih\\.gov|heart\\.org|diabetes\\.org)/i;\nconst safe = dedup.filter(c => !banned.test(c.text));\n\n// Score\nfor (const c of safe) {\n  c.score = 0;\n  if (c.source === 'kb') c.score += 2;\n  if (whitelist.test(c.source || '')) c.score += 1;\n}\n\nsafe.sort((a,b)=> b.score - a.score);\nconst top = safe.slice(0, 8);\n\n// Carry forward barriers + input for Strategist\nconst barriersNode = $items(\"OpenAI: Barrier Classifier\")[0]?.json;\nconst inputNode = $items(\"Normalize Input\")[0]?.json?.input;\nreturn [{ candidates: top, barriers: (barriersNode?.barriers || barriersNode || []), input: inputNode }];"
+      },
+      "id": "MergeGuard",
+      "name": "Merge + Guard",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [1990, 285]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "You are a Behavioral Strategist AI for medication adherence.\nUse ONLY from the provided candidate strategies. Do not invent medical/dosing advice.\nChoose the 2–3 best for the detected barriers and the user's context.\nPersonalize wording; keep supportive and practical.\nReturn JSON: { \"final_strategies\": [ \"...\" ] }",
+        "messages": [
+          {
+            "text": "Barriers: {{$json[\"barriers\"]}}\nCandidates: {{$json[\"candidates\"]}}\nPatient context: {{$json[\"input\"]}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "json",
+        "temperature": 0.6
+      },
+      "id": "Strategist",
+      "name": "OpenAI: Behavioral Strategist",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 4,
+      "position": [2230, 285],
+      "credentials": {
+        "openAIApi": {
+          "id": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{Array.isArray($json.final_strategies) && $json.final_strategies.length>0}}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "id": "SchemaCheck",
+      "name": "Schema Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2470, 285]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Fallback: take top 2 candidates if strategist failed */\nconst merge = $items(\"Merge + Guard\")[0].json;\nconst picks = (merge.candidates || []).slice(0,2).map(c => c.text);\nreturn [{ final_strategies: picks }];"
+      },
+      "id": "FallbackPicks",
+      "name": "Fallback Picks",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [2470, 420]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o",
+        "systemMessage": "You are a Reasoning/Safety AI.\nValidate the selected strategies for safety, feasibility, and fit.\nRemove anything unsafe or impractical; be empathetic and clear.\nNo dosing or clinical instructions. Encourage clinician contact for medical concerns.\nReturn a short patient-ready message (plain text).",
+        "messages": [
+          {
+            "text": "Patient input:\n{{$node[\"Normalize Input\"].json[\"input\"]}}\n\nBarriers:\n{{$node[\"OpenAI: Barrier Classifier\"].json}}\n\nSelected strategies:\n{{$json[\"final_strategies\"]}}",
+            "type": "user"
+          }
+        ],
+        "responseFormat": "text",
+        "temperature": 0.2
+      },
+      "id": "Reasoner",
+      "name": "OpenAI: Reasoning & Safety",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 4,
+      "position": [2710, 285],
+      "credentials": {
+        "openAIApi": {
+          "id": ""
+        }
+      }
+    },
+    {
+      "parameters": {
+        "responseBody": "={{$json}}",
+        "responseHeaders": {},
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "Respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 2,
+      "position": [2950, 285]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Barrier Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Barrier Classifier": {
+      "main": [
+        [
+          {
+            "node": "Load KB (Pre-approved)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP: CDC Search",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP: NIH Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: CDC Search": {
+      "main": [
+        [
+          {
+            "node": "Collect Web Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: NIH Search": {
+      "main": [
+        [
+          {
+            "node": "Collect Web Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Web Text": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Web Strategy Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Web Strategy Extractor": {
+      "main": [
+        [
+          {
+            "node": "Map Web Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Web Candidates": {
+      "main": [
+        [
+          {
+            "node": "Merge + Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load KB (Pre-approved)": {
+      "main": [
+        [
+          {
+            "node": "Merge + Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge + Guard": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Behavioral Strategist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Behavioral Strategist": {
+      "main": [
+        [
+          {
+            "node": "Schema Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema Check": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Reasoning & Safety",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fallback Picks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fallback Picks": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: Reasoning & Safety",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: Reasoning & Safety": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "meta": {
+    "instanceId": "replace-with-your-instance-id"
+  },
+  "pinData": {}
+}
