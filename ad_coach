@@ -1,345 +1,190 @@
-{
-  "name": "Adherence Coach (Core HTTP + Trusted Web • Code Nodes)",
-  "nodes": [
-    {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "adherence-coach",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2.1,
-      "position": [0, 0],
-      "id": "webhook-1",
-      "name": "Webhook",
-      "webhookId": "adherence-coach"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const t = (x) => (x ?? '').toString().trim().slice(0, 1000);\n  const n = (x) => Number.isFinite(Number(x)) ? Number(x) : 0;\n  const b = item.json || {};\n  return { json: { input: { text: t(b.text), missed_doses: n(b.missed_doses), symptoms: t(b.symptoms), concerns: t(b.concerns) } } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [220, 0],
-      "id": "code-normalize",
-      "name": "Normalize Input"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const input = item.json.input;\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"Classify medication-adherence barriers. Output JSON only: { \\\"barriers\\\": [labels], \\\"confidence\\\": 0..1 }. Labels: forgetfulness, fear_of_side_effects, cost, complex_regimen, low_motivation, low_health_literacy, access_issues, side_effects_present. Choose 1–3. Be conservative.\" },\n      { role: \"user\", content: `Patient input: ${JSON.stringify(input)}` }\n    ]\n  } } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [460, -120],
-      "id": "code-build-classifier",
-      "name": "Build Classifier Payload"
-    },
-    {
-      "parameters": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "method": "POST",
-        "responseFormat": "json",
-        "jsonParameters": true,
-        "sendHeaders": true,
-        "headerParametersUi": {
-          "parameter": [
-            { "name": "Authorization", "value": "Bearer {{$env.OPENAI_API_KEY}}" },
-            { "name": "Content-Type", "value": "application/json" }
-          ]
-        },
-        "sendBody": true,
-        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [700, -120],
-      "id": "http-classifier",
-      "name": "HTTP: Classifier"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const raw = item.json?.choices?.[0]?.message?.content || '{}';\n  let parsed; try { parsed = JSON.parse(raw) } catch { parsed = {} }\n  const barriers = Array.isArray(parsed.barriers) ? parsed.barriers.slice(0,3) : [];\n  const confidence = Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0;\n  return { json: { barriers, confidence } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [940, -120],
-      "id": "code-parse-classifier",
-      "name": "Parse Classifier JSON"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const KB = {\n    fear_of_side_effects: [\n      \"Keep a brief symptom diary to discuss specifics with your clinician.\",\n      \"Practice a 2-minute breathing exercise before your dose.\",\n      \"Use trusted sources (CDC/FDA) rather than random searches.\",\n      \"If concerned, note it, continue routine, and contact your clinician if it persists.\"\n    ],\n    forgetfulness: [\n      \"Set recurring phone alarms at dose times.\",\n      \"Pair your dose with a daily routine (brushing teeth/breakfast).\",\n      \"Use a weekly pillbox in a visible place.\"\n    ],\n    low_motivation: [\n      \"Track adherence and give yourself a small weekly reward.\",\n      \"Link the dose to a personal goal (e.g., more energy for family).\",\n      \"Use short positive self-talk.\"\n    ],\n    complex_regimen: [\n      \"Use a pill organizer labeled by time of day.\",\n      \"Post a simple schedule where you can see it daily.\",\n      \"Ask your clinician/pharmacist whether timing can be simplified.\"\n    ]\n  };\n  const labels = item.json.barriers || [];\n  const out = [];\n  for (const b of labels) (KB[b]||[]).forEach(s => out.push({ text: s, source: \"kb\" }));\n  return { json: { candidates_kb: out } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1180, -200],
-      "id": "code-load-kb",
-      "name": "Load KB (Pre-approved)"
-    },
-    {
-      "parameters": {
-        "url": "https://www.cdc.gov/search/?query=medication%20adherence%20{{$node[\"Parse Classifier JSON\"].json.barriers?.[0] || 'tips'}}",
-        "responseFormat": "string",
-        "options": { "fullResponse": true }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [1180, -20],
-      "id": "http-cdc",
-      "name": "HTTP: CDC Search"
-    },
-    {
-      "parameters": {
-        "url": "https://search.nih.gov/search?utf8=%E2%9C%93&affiliate=nih&query=medication%20adherence%20{{$node[\"Parse Classifier JSON\"].json.barriers?.[0] || 'tips'}}",
-        "responseFormat": "string",
-        "options": { "fullResponse": true }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [1180, 120],
-      "id": "http-nih",
-      "name": "HTTP: NIH Search"
-    },
-    {
-      "parameters": {
-        "jsCode": "function strip(html){return String(html||'').replace(/<script[\\s\\S]*?<\\/script>/gi,'').replace(/<style[\\s\\S]*?<\\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\\s+/g,' ').trim().slice(0,4000);} \nconst all = $input.all();\nconst chunks = [];\nfor (const inb of all){\n  const b = inb.json || {};\n  const body = b.body || b;\n  const text = strip(body);\n  if (inb.node.name.includes('CDC')) chunks.push({domain:'cdc.gov', text});\n  if (inb.node.name.includes('NIH')) chunks.push({domain:'nih.gov', text});\n}\nreturn [{ json: { webText: chunks } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1420, 50],
-      "id": "code-collect-web",
-      "name": "Collect Web Text"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const extracts = item.json.webText || [];\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"Extract behavioral adherence strategies (non-medical) from provided text. Output JSON only: {\\\\\"strategies\\\\\":[..]}\" },\n      { role: \"user\", content: `Trusted extracts: ${JSON.stringify(extracts)}` }\n    ]\n  } } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1660, 50],
-      "id": "code-build-extractor",
-      "name": "Build Extractor Payload"
-    },
-    {
-      "parameters": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "method": "POST",
-        "responseFormat": "json",
-        "jsonParameters": true,
-        "sendHeaders": true,
-        "headerParametersUi": {
-          "parameter": [
-            { "name": "Authorization", "value": "Bearer {{$env.OPENAI_API_KEY}}" },
-            { "name": "Content-Type", "value": "application/json" }
-          ]
-        },
-        "sendBody": true,
-        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [1900, 50],
-      "id": "http-extractor",
-      "name": "HTTP: Web Strategy Extractor"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const raw = item.json?.choices?.[0]?.message?.content || '{}';\n  let parsed; try { parsed = JSON.parse(raw) } catch { parsed = {} }\n  const arr = Array.isArray(parsed.strategies) ? parsed.strategies : [];\n  return { json: { candidates_web: arr.map(s => ({ text: String(s), source: 'web' })) } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2140, 50],
-      "id": "code-map-web",
-      "name": "Map Web Candidates"
-    },
-    {
-      "parameters": {
-        "jsCode": "const inputs = $input.all();\nconst kb = (inputs.find(i => i.node.name.includes('Load KB'))?.json.candidates_kb) || [];\nconst web = (inputs.find(i => i.node.name.includes('Map Web'))?.json.candidates_web) || [];\nconst all = [...kb, ...web];\nconst seen = new Set();\nconst dedup = [];\nfor (const c of all){ const k=(c.text||'').toLowerCase().trim(); if(!k||seen.has(k)) continue; seen.add(k); dedup.push(c); }\nconst banned=/double dose|skip dose|increase dose|decrease dose|\\bmg\\b|milligram|store in unsafe/i;\nconst safe = dedup.filter(c => !banned.test(c.text));\nsafe.forEach(c=> c.score = (c.source==='kb'?2:1));\nsafe.sort((a,b)=> b.score-a.score);\nreturn [{ json: { candidates: safe.slice(0,8) } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2380, -80],
-      "id": "code-merge-guard",
-      "name": "Merge + Guard"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const data = item.json;\n  return { json: { payload: {\n    model: \"gpt-4o-mini\",\n    response_format: { type: \"json_object\" },\n    temperature: 0.6,\n    messages: [\n      { role: \"system\", content: \"You are a Behavioral Strategist AI for medication adherence. Use ONLY from provided candidates. Choose 2–3. No medical/dosing advice. Output JSON only: {\\\\\"final_strategies\\\\\":[..]}\" },\n      { role: \"user\", content: `Candidates: ${JSON.stringify(data.candidates)}` }\n    ]\n  } } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [2620, -80],
-      "id": "code-build-strategist",
-      "name": "Build Strategist Payload"
-    },
-    {
-      "parameters": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "method": "POST",
-        "responseFormat": "json",
-        "jsonParameters": true,
-        "sendHeaders": true,
-        "headerParametersUi": {
-          "parameter": [
-            { "name": "Authorization", "value": "Bearer {{$env.OPENAI_API_KEY}}" },
-            { "name": "Content-Type", "value": "application/json" }
-          ]
-        },
-        "sendBody": true,
-        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [2860, -80],
-      "id": "http-strategist",
-      "name": "HTTP: Strategist"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  let parsed={}; try{ parsed = JSON.parse(item.json?.choices?.[0]?.message?.content || '{}') } catch {}\n  const picks = Array.isArray(parsed.final_strategies) ? parsed.final_strategies.slice(0,3) : [];\n  return { json: { final_strategies: picks } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [3100, -80],
-      "id": "code-parse-strategist",
-      "name": "Parse Strategist JSON"
-    },
-    {
-      "parameters": {
-        "jsCode": "const all = $input.all();\nconst chosen = (all.find(i=>i.node.name.includes('Parse Strategist'))?.json.final_strategies) || [];\nif (chosen.length>0) return [{ json: { final_strategies: chosen } }];\nconst candidates = (all.find(i=>i.node.name.includes('Merge + Guard'))?.json.candidates) || [];\nreturn [{ json: { final_strategies: candidates.slice(0,2).map(c=>c.text) } }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [3340, -80],
-      "id": "code-pick-fallback",
-      "name": "Pick (with Fallback)"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => {\n  const selected = item.json.final_strategies || [];\n  return { json: { payload: {\n    model: \"gpt-4o\",\n    temperature: 0.2,\n    messages: [\n      { role: \"system\", content: \"You are a Reasoning/Safety AI. Validate and phrase selected strategies empathetically. No dosing or clinical instructions. Output short plain text.\" },\n      { role: \"user\", content: `Selected strategies: ${JSON.stringify(selected)}` }\n    ]\n  } } };\n});"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [3580, -80],
-      "id": "code-build-reasoner",
-      "name": "Build Reasoner Payload"
-    },
-    {
-      "parameters": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "method": "POST",
-        "responseFormat": "json",
-        "jsonParameters": true,
-        "sendHeaders": true,
-        "headerParametersUi": {
-          "parameter": [
-            { "name": "Authorization", "value": "Bearer {{$env.OPENAI_API_KEY}}" },
-            { "name": "Content-Type", "value": "application/json" }
-          ]
-        },
-        "sendBody": true,
-        "bodyParametersJson": "={{ JSON.stringify($json.payload) }}"
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
-      "position": [3820, -80],
-      "id": "http-reasoner",
-      "name": "HTTP: Reasoner"
-    },
-    {
-      "parameters": {
-        "jsCode": "return items.map(item => ({ json: { message: (item.json?.choices?.[0]?.message?.content || '').toString() } }));"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [4060, -80],
-      "id": "code-extract-text",
-      "name": "Extract Final Text"
-    },
-    {
-      "parameters": {
-        "responseBody": "={{ $json }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 2,
-      "position": [4300, -80],
-      "id": "respond-1",
-      "name": "Respond"
-    }
-  ],
-  "connections": {
-    "Webhook": {
-      "main": [[{ "node": "Normalize Input", "type": "main", "index": 0 }]]
-    },
-    "Normalize Input": {
-      "main": [[{ "node": "Build Classifier Payload", "type": "main", "index": 0 }]]
-    },
-    "Build Classifier Payload": {
-      "main": [[{ "node": "HTTP: Classifier", "type": "main", "index": 0 }]]
-    },
-    "HTTP: Classifier": {
-      "main": [[{ "node": "Parse Classifier JSON", "type": "main", "index": 0 }]]
-    },
-    "Parse Classifier JSON": {
-      "main": [
-        [{ "node": "Load KB (Pre-approved)", "type": "main", "index": 0 }],
-        [{ "node": "HTTP: CDC Search", "type": "main", "index": 0 }],
-        [{ "node": "HTTP: NIH Search", "type": "main", "index": 0 }]
-      ]
-    },
-    "HTTP: CDC Search": {
-      "main": [[{ "node": "Collect Web Text", "type": "main", "index": 0 }]]
-    },
-    "HTTP: NIH Search": {
-      "main": [[{ "node": "Collect Web Text", "type": "main", "index": 0 }]]
-    },
-    "Collect Web Text": {
-      "main": [[{ "node": "Build Extractor Payload", "type": "main", "index": 0 }]]
-    },
-    "Build Extractor Payload": {
-      "main": [[{ "node": "HTTP: Web Strategy Extractor", "type": "main", "index": 0 }]]
-    },
-    "HTTP: Web Strategy Extractor": {
-      "main": [[{ "node": "Map Web Candidates", "type": "main", "index": 0 }]]
-    },
-    "Map Web Candidates": {
-      "main": [[{ "node": "Merge + Guard", "type": "main", "index": 0 }]]
-    },
-    "Load KB (Pre-approved)": {
-      "main": [[{ "node": "Merge + Guard", "type": "main", "index": 0 }]]
-    },
-    "Merge + Guard": {
-      "main": [[{ "node": "Build Strategist Payload", "type": "main", "index": 0 }]]
-    },
-    "Build Strategist Payload": {
-      "main": [[{ "node": "HTTP: Strategist", "type": "main", "index": 0 }]]
-    },
-    "HTTP: Strategist": {
-      "main": [[{ "node": "Parse Strategist JSON", "type": "main", "index": 0 }]]
-    },
-    "Parse Strategist JSON": {
-      "main": [[{ "node": "Pick (with Fallback)", "type": "main", "index": 0 }]]
-    },
-    "Pick (with Fallback)": {
-      "main": [[{ "node": "Build Reasoner Payload", "type": "main", "index": 0 }]]
-    },
-    "Build Reasoner Payload": {
-      "main": [[{ "node": "HTTP: Reasoner", "type": "main", "index": 0 }]]
-    },
-    "HTTP: Reasoner": {
-      "main": [[{ "node": "Extract Final Text", "type": "main", "index": 0 }]]
-    },
-    "Extract Final Text": {
-      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
-    }
-  },
-  "active": false,
-  "settings": { "executionOrder": "v1" },
-  "versionId": "core-http-trusted-web-code",
-  "meta": {
-    "instanceId": "replace-with-your-instance-id"
-  },
-  "id": "AdherenceCoach-CoreHTTP-TrustedWeb-Code",
-  "tags": []
-}
+# ============================
+# .env (shared configuration)
+# ============================
+
+# ============================
+# config.py (shared loader)
+# ============================
+import os
+from dotenv import load_dotenv
+# Load environment variables from .env
+load_dotenv()
+class Config:
+ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ NEO4J_URI = os.getenv("NEO4J_URI")
+ NEO4J_USER = os.getenv("NEO4J_USER")
+ NEO4J_PASS = os.getenv("NEO4J_PASS")
+ @staticmethod
+ def validate():
+ missing = []
+ for key, value in Config.__dict__.items():
+ if key.isupper() and value is None:
+ missing.append(key)
+ if missing:
+ raise ValueError(f"
+❌
+ Missing required environment variables: {', '.join(missing)}")
+# ============================
+# parser_server.py (MCP Server)
+# ============================
+import os
+import asyncio
+import requests
+from openai import AsyncOpenAI
+from mcp.server.fastmcp import FastMCP
+from config import Config
+# Validate environment variables
+Config.validate()
+client = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
+mcp = FastMCP("ResumeService")
+RESUME_FOLDER = "resumes"
+SYSTEM_CONTEXT = "You are a resume parsing engine that generates Neo4j Cypher queries."
+TASK_CONTEXT = """
+Extract candidate data and relationships following this schema:
+(:Person {name, email, phone})
+ -[:HAS_SKILL]->(:Skill {name})
+ -[:WORKED_ON]->(:Project {title, description})
+ -[:HAS_EDUCATION]->(:Education {degree, university, year})
+ -[:WORKED_AT]->(:Experience {company, role, duration})
+(:Project)-[:USED_SKILL]->(:Skill)
+"""
+RULES = """
+- Always use MERGE to avoid duplicates.
+- Output ONLY Cypher queries, one per line.
+"""
+async def parse_resume_to_cypher(text: str, model: str = "gpt-4o-mini") -> str:
+ final_prompt = f"""
+ {SYSTEM_CONTEXT}
+ {TASK_CONTEXT}
+ {RULES}
+ Resume:
+ {text}
+ """
+ response = await client.chat.completions.create(
+ model=model,
+ messages=[
+ {"role": "system", "content": "You are a Neo4j Cypher generator."},
+ {"role": "user", "content": final_prompt}
+ ]
+ )
+ return response.choices[0].message.content.strip()
+async def _commit_to_neo4j(cypher_queries: str) -> dict:
+ payload = {"statements": [{"statement": q.strip()} for q in cypher_queries.split("\n") if q.strip()]}
+ loop = asyncio.get_event_loop()
+ return await loop.run_in_executor(
+ None,
+ lambda: requests.post(
+ Config.NEO4J_URI,
+ auth=(Config.NEO4J_USER, Config.NEO4J_PASS),
+ json=payload,
+ headers={"Content-Type": "application/json"}
+ ).json()
+ )
+async def process_resume(filename: str, text: str):
+ cypher = await parse_resume_to_cypher(text)
+ result = await _commit_to_neo4j(cypher)
+ return {"file": filename, "cypher": cypher, "result": result}
+# MCP Tools
+@mcp.tool()
+async def ingest_resumes() -> dict:
+ if not os.path.exists(RESUME_FOLDER):
+ return {"error": f"Folder '{RESUME_FOLDER}' not found."}
+ tasks = []
+ for file in os.listdir(RESUME_FOLDER):
+ if file.endswith(".txt"):
+ with open(os.path.join(RESUME_FOLDER, file), "r", encoding="utf-8") as f:
+ resume_text = f.read()
+ tasks.append(process_resume(file, resume_text))
+ results = await asyncio.gather(*tasks)
+ return {"ingested": results}
+@mcp.tool()
+async def ingest_one_resume(text: str, filename: str = "uploaded_resume.txt") -> dict:
+ return await process_resume(filename, text)
+@mcp.tool()
+async def commit_to_neo4j(cypher_queries: str) -> dict:
+ return await _commit_to_neo4j(cypher_queries)
+@mcp.tool()
+async def search_candidate(prompt: str, model: str = "gpt-4o-mini") -> dict:
+ schema_context = """
+ Graph Schema:
+ (:Person {name, email, phone})
+ -[:HAS_SKILL]->(:Skill {name})
+ -[:WORKED_ON]->(:Project {title, description})
+ -[:HAS_EDUCATION]->(:Education {degree, university, year})
+ -[:WORKED_AT]->(:Experience {company, role, duration})
+ (:Project)-[:USED_SKILL]->(:Skill)
+ Rules:
+ - Always use Cypher 5 syntax.
+ - Only return Cypher queries, no explanations.
+ """
+ final_prompt = f"""
+ You are a Cypher query generator for Neo4j.
+ Schema:
+ {schema_context}
+ User request: {prompt}
+ """
+ response = await client.chat.completions.create(
+ model=model,
+ messages=[
+ {"role": "system", "content": "You are a Neo4j Cypher generator."},
+ {"role": "user", "content": final_prompt}
+ ]
+ )
+ cypher_query = response.choices[0].message.content.strip()
+ result = await _commit_to_neo4j(cypher_query)
+ return {"cypher": cypher_query, "neo4j_response": result}
+if __name__ == "__main__":
+ print("
+ ResumeService MCP server running (stdio transport)")
+ mcp.run()
+# ============================
+# app.py (Streamlit UI)
+# ============================
+import asyncio
+import streamlit as st
+from mcp.client import Client
+from config import Config
+Config.validate()
+def run_async(coro):
+ return asyncio.get_event_loop().run_until_complete(coro)
+async def run_search(prompt: str):
+ client = Client("ResumeService")
+ await client.start(["python", "parser_server.py"])
+ result = await client.call_tool("search_candidate", {"prompt": prompt})
+ await client.stop()
+ return result
+st.set_page_config(page_title="Resume Search", layout="wide")
+st.title("
+ Resume Search with Neo4j + MCP")
+prompt = st.text_input("Ask your question (e.g., 'Find candidates with Python and NLP')")
+if st.button("Search"):
+ result = run_async(run_search(prompt))
+ st.text_area("Generated Cypher Query", result["cypher"], height=200)
+ st.json(result["neo4j_response"])
+# ============================
+# agent.py (Standalone Agent)
+# ============================
+import asyncio
+from mcp.client import Client
+from config import Config
+Config.validate()
+async def main():
+ client = Client("ResumeService")
+ await client.start(["python", "parser_server.py"])
+ ingest_result = await client.call_tool("ingest_resumes", {})
+ print("=== Ingest Resumes ===")
+ print(ingest_result)
+ single_result = await client.call_tool("ingest_one_resume", {
+ "text": "Jane Doe, Email: jane@example.com, Skills: Python, React",
+ "filename": "resume_jane.txt"
+ })
+ print("=== Ingest One Resume ===")
+ print(single_result)
+ search_result = await client.call_tool("search_candidate", {
+ "prompt": "Find candidates with Python"
+ })
+ print("=== Search Result ===")
+ print(search_result)
+ await client.stop()
+if __name__ == "__main__":
+ asyncio.run(main())
