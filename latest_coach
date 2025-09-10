@@ -2,23 +2,27 @@ import json
 import re
 
 # ----- config -----
-BASE_FROM = 3111  # series starts here now
-BASE_TO   = 4000  # remap so series starts here
-PAT_4DIG  = re.compile(r"^ABC-(\d{4})$")
+BASE_FROM = 3111
+BASE_TO   = 4000
+PAT = re.compile(r"^ABC-(\d+)$")  # allow variable digit lengths
 
 def remap_abc(s: str) -> str:
-    """Remap 'ABC-3111' style codes so the series starts at ABC-4000."""
-    m = PAT_4DIG.match(s or "")
+    """Shift ABC-3111 series to start at ABC-4000, keeping offsets."""
+    m = PAT.match(s or "")
     if not m:
         return s
     n = int(m.group(1))
     if n < BASE_FROM:
         return s
     new_n = BASE_TO + (n - BASE_FROM)
-    return f"ABC-{new_n:04d}"  # keep 4 digits
+    return f"ABC-{new_n}"  # keep natural width
+
+def normalize(text: str) -> str:
+    """Normalize for deduplication: lowercase, remove non-alphanumeric."""
+    return re.sub(r'[^a-z0-9]', '', text.lower())
 
 def walk_remap(obj):
-    """Recursively remap strings in any dict/list structure."""
+    """Recursively walk structure and remap ABC codes."""
     if isinstance(obj, dict):
         return {k: walk_remap(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -28,16 +32,13 @@ def walk_remap(obj):
     return obj
 
 def dedup_by_key_desc(items):
-    """
-    Remove duplicates where both 'key' and 'Desc' match.
-    Keeps first occurrence, preserves order.
-    """
+    """Remove duplicates where key+Desc match after normalization."""
     seen = set()
     out = []
     for it in items:
         if isinstance(it, dict):
-            k = str(it.get("key", "")).strip()
-            d = str(it.get("Desc", "")).strip()
+            k = normalize(str(it.get("key", "")))
+            d = normalize(str(it.get("Desc", "")))
             sig = (k, d)
             if sig in seen:
                 continue
@@ -49,7 +50,7 @@ def dedup_by_key_desc(items):
 with open("data.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
-# ----- dedup (only if top-level is a list of items or {"data":[...]}) -----
+# ----- dedup if list or dict[data] -----
 if isinstance(data, list):
     data = dedup_by_key_desc(data)
 elif isinstance(data, dict) and isinstance(data.get("data"), list):
