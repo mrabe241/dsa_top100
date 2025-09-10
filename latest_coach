@@ -1,85 +1,63 @@
-import os
-import random
-from faker import Faker
+import json
+import re
 
-# Initialize faker
-fake = Faker()
+# ----- config -----
+BASE_FROM = 3111  # series starts here now
+BASE_TO   = 4000  # remap so series starts here
+PAT_4DIG  = re.compile(r"^ABC-(\d{4})$")
 
-# Skills pool
-skills_pool = [
-    "Python", "Java", "C++", "JavaScript", "SQL", "React", "Angular",
-    "Node.js", "AWS", "Azure", "Docker", "Kubernetes", "Machine Learning",
-    "Data Analysis", "Django", "Flask", "NoSQL", "HTML", "CSS", "Git", "Tableau"
-]
+def remap_abc(s: str) -> str:
+    """Remap 'ABC-3111' style codes so the series starts at ABC-4000."""
+    m = PAT_4DIG.match(s or "")
+    if not m:
+        return s
+    n = int(m.group(1))
+    if n < BASE_FROM:
+        return s
+    new_n = BASE_TO + (n - BASE_FROM)
+    return f"ABC-{new_n:04d}"  # keep 4 digits
 
-# Roles
-roles = [
-    "Software Engineer", "Data Scientist", "Frontend Developer",
-    "Backend Developer", "DevOps Engineer", "Machine Learning Engineer",
-    "Cloud Architect", "Business Analyst", "Full Stack Developer"
-]
+def walk_remap(obj):
+    """Recursively remap strings in any dict/list structure."""
+    if isinstance(obj, dict):
+        return {k: walk_remap(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [walk_remap(v) for v in obj]
+    elif isinstance(obj, str):
+        return remap_abc(obj)
+    return obj
 
-# Degrees
-degrees = [
-    "B.Sc. Computer Science", "M.Sc. Data Science", "B.Tech Information Technology",
-    "M.Tech Artificial Intelligence", "MBA Information Systems", "B.Sc. Software Engineering"
-]
+def dedup_by_key_desc(items):
+    """
+    Remove duplicates where both 'key' and 'Desc' match.
+    Keeps first occurrence, preserves order.
+    """
+    seen = set()
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            k = str(it.get("key", "")).strip()
+            d = str(it.get("Desc", "")).strip()
+            sig = (k, d)
+            if sig in seen:
+                continue
+            seen.add(sig)
+        out.append(it)
+    return out
 
-# Folder to store resumes
-output_folder = "resumes"
-os.makedirs(output_folder, exist_ok=True)
+# ----- load -----
+with open("data.json", "r", encoding="utf-8") as f:
+    data = json.load(f)
 
-for i in range(1, 101):
-    name = fake.name()
-    email = fake.email()
-    phone = fake.phone_number()
+# ----- dedup (only if top-level is a list of items or {"data":[...]}) -----
+if isinstance(data, list):
+    data = dedup_by_key_desc(data)
+elif isinstance(data, dict) and isinstance(data.get("data"), list):
+    data["data"] = dedup_by_key_desc(data["data"])
 
-    # Random skills
-    skills = random.sample(skills_pool, k=random.randint(5, 10))
+# ----- remap codes everywhere -----
+updated = walk_remap(data)
 
-    # Random experience
-    exp_entries = []
-    for _ in range(random.randint(2, 4)):
-        company = fake.company()
-        role = random.choice(roles)
-        start_year = random.randint(2012, 2020)
-        end_year = start_year + random.randint(1, 5)
-        desc = fake.sentence(nb_words=12)
-        exp_entries.append(f"{role} at {company} ({start_year}-{end_year}) — {desc}")
-
-    # Random projects
-    project_entries = []
-    for _ in range(random.randint(1, 3)):
-        project_title = fake.catch_phrase()
-        project_desc = fake.text(max_nb_chars=120)
-        project_skills = random.sample(skills, k=random.randint(2, 4))
-        project_entries.append(f"{project_title}: {project_desc} (Used: {', '.join(project_skills)})")
-
-    # Education
-    degree = random.choice(degrees)
-    university = fake.company() + " University"
-    grad_year = random.randint(2008, 2022)
-
-    resume_text = f"""
-Name: {name}
-Email: {email}
-Phone: {phone}
-
-Skills:
-- {", ".join(skills)}
-
-Experience:
-- {'\n- '.join(exp_entries)}
-
-Projects:
-- {'\n- '.join(project_entries)}
-
-Education:
-- {degree}, {university}, {grad_year}
-"""
-
-    file_path = os.path.join(output_folder, f"resume_{i}.txt")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(resume_text.strip())
-
-print("✅ 100 fake resumes generated in 'resumes/' folder with experience & projects.")
+# ----- save -----
+with open("data_updated.json", "w", encoding="utf-8") as f:
+    json.dump(updated, f, indent=2, ensure_ascii=False)
