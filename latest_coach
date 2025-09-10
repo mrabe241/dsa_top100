@@ -1,26 +1,21 @@
 import json
 import re
-from difflib import SequenceMatcher
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# ---------- config ----------
-BASE_FROM = 3111            # original series start
-BASE_TO   = 4000            # new series start
-SIM_THRESHOLD = 1.0         # 1.0 = require 100% similarity (after normalization). Try 0.97 for fuzzy.
+# ----- config -----
+BASE_FROM = 3111
+BASE_TO   = 4000
+SIM_THRESHOLD = 0.95   # adjust (0.9 ~ fuzzy, 1.0 = only exact embeddings)
 
 PAT_ABC = re.compile(r"^ABC-(\d+)$")
 
-# ---------- helpers ----------
-def normalize(s: str) -> str:
-    """Lowercase and remove all non-alphanumeric chars for robust comparison."""
-    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
-
-def similar(a: str, b: str) -> float:
-    """Similarity ratio of two strings (0..1) using difflib."""
-    return SequenceMatcher(None, a, b).ratio()
+# Load embedding model (lightweight multilingual model)
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 def remap_abc(s: str) -> str:
-    """Shift ABC-<n> where n>=3111 so that 3111->4000, 3112->4001, etc.
-       Keeps original digit width (zero-pads to same length)."""
+    """Shift ABC-<n> where n>=3111 so that 3111->4000, 3112->4001, etc."""
     m = PAT_ABC.match(s or "")
     if not m:
         return s
@@ -32,7 +27,7 @@ def remap_abc(s: str) -> str:
     return f"ABC-{str(new_n).zfill(len(digits))}"
 
 def walk_remap(obj):
-    """Recursively remap ABC codes across dicts/lists/strings."""
+    """Recursively walk and remap ABC codes."""
     if isinstance(obj, dict):
         return {k: walk_remap(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -41,42 +36,47 @@ def walk_remap(obj):
         return remap_abc(obj)
     return obj
 
-def dedup_by_similarity(items, threshold=SIM_THRESHOLD):
+def dedup_by_embeddings(items, threshold=SIM_THRESHOLD):
     """
-    Remove duplicates where (key + Desc) are 'threshold'-similar after normalization.
-    Keeps first occurrence; preserves order.
+    Deduplicate based on semantic similarity of (key + Desc) using embeddings.
+    Keeps the first item; drops subsequent ones if similarity >= threshold.
     """
     kept = []
-    signatures = []  # store normalized composite strings for similarity checks
+    kept_embs = []
+
     for it in items:
         if not isinstance(it, dict):
-            # keep non-dict items as-is
             kept.append(it)
             continue
-        k = normalize(str(it.get("key", "")))
-        d = normalize(str(it.get("Desc", "")))
-        comp = f"{k}|{d}"
 
-        # compare to all kept signatures
-        is_dup = any(similar(comp, prev) >= threshold for prev in signatures)
-        if is_dup:
-            continue
-        signatures.append(comp)
-        kept.append(it)
+        comp = f"{it.get('key','')} | {it.get('Desc','')}"
+        emb = model.encode([comp], normalize_embeddings=True)
+
+        is_dup = False
+        if kept_embs:
+            sims = cosine_similarity(emb, np.vstack(kept_embs))[0]
+            if sims.max() >= threshold:
+                is_dup = True
+
+        if not is_dup:
+            kept.append(it)
+            kept_embs.append(emb[0])
+
     return kept
 
-# ---------- main ----------
+# ----- load -----
 with open("data.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
-# 1) Dedupe only when the top-level is a list of objects or { "data": [...] }
+# ----- dedup -----
 if isinstance(data, list):
-    data = dedup_by_similarity(data, SIM_THRESHOLD)
+    data = dedup_by_embeddings(data)
 elif isinstance(data, dict) and isinstance(data.get("data"), list):
-    data["data"] = dedup_by_similarity(data["data"], SIM_THRESHOLD)
+    data["data"] = dedup_by_embeddings(data["data"])
 
-# 2) Remap ABC codes everywhere
+# ----- remap ABC codes -----
 updated = walk_remap(data)
 
+# ----- save -----
 with open("data_updated.json", "w", encoding="utf-8") as f:
     json.dump(updated, f, indent=2, ensure_ascii=False)
