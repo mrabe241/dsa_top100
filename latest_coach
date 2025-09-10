@@ -1,64 +1,82 @@
 import json
 import re
+from difflib import SequenceMatcher
 
-# ----- config -----
-BASE_FROM = 3111
-BASE_TO   = 4000
-PAT = re.compile(r"^ABC-(\d+)$")  # allow variable digit lengths
+# ---------- config ----------
+BASE_FROM = 3111            # original series start
+BASE_TO   = 4000            # new series start
+SIM_THRESHOLD = 1.0         # 1.0 = require 100% similarity (after normalization). Try 0.97 for fuzzy.
+
+PAT_ABC = re.compile(r"^ABC-(\d+)$")
+
+# ---------- helpers ----------
+def normalize(s: str) -> str:
+    """Lowercase and remove all non-alphanumeric chars for robust comparison."""
+    return re.sub(r'[^a-z0-9]', '', (s or '').lower())
+
+def similar(a: str, b: str) -> float:
+    """Similarity ratio of two strings (0..1) using difflib."""
+    return SequenceMatcher(None, a, b).ratio()
 
 def remap_abc(s: str) -> str:
-    """Shift ABC-3111 series to start at ABC-4000, keeping offsets."""
-    m = PAT.match(s or "")
+    """Shift ABC-<n> where n>=3111 so that 3111->4000, 3112->4001, etc.
+       Keeps original digit width (zero-pads to same length)."""
+    m = PAT_ABC.match(s or "")
     if not m:
         return s
-    n = int(m.group(1))
+    digits = m.group(1)
+    n = int(digits)
     if n < BASE_FROM:
         return s
     new_n = BASE_TO + (n - BASE_FROM)
-    return f"ABC-{new_n}"  # keep natural width
-
-def normalize(text: str) -> str:
-    """Normalize for deduplication: lowercase, remove non-alphanumeric."""
-    return re.sub(r'[^a-z0-9]', '', text.lower())
+    return f"ABC-{str(new_n).zfill(len(digits))}"
 
 def walk_remap(obj):
-    """Recursively walk structure and remap ABC codes."""
+    """Recursively remap ABC codes across dicts/lists/strings."""
     if isinstance(obj, dict):
         return {k: walk_remap(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    if isinstance(obj, list):
         return [walk_remap(v) for v in obj]
-    elif isinstance(obj, str):
+    if isinstance(obj, str):
         return remap_abc(obj)
     return obj
 
-def dedup_by_key_desc(items):
-    """Remove duplicates where key+Desc match after normalization."""
-    seen = set()
-    out = []
+def dedup_by_similarity(items, threshold=SIM_THRESHOLD):
+    """
+    Remove duplicates where (key + Desc) are 'threshold'-similar after normalization.
+    Keeps first occurrence; preserves order.
+    """
+    kept = []
+    signatures = []  # store normalized composite strings for similarity checks
     for it in items:
-        if isinstance(it, dict):
-            k = normalize(str(it.get("key", "")))
-            d = normalize(str(it.get("Desc", "")))
-            sig = (k, d)
-            if sig in seen:
-                continue
-            seen.add(sig)
-        out.append(it)
-    return out
+        if not isinstance(it, dict):
+            # keep non-dict items as-is
+            kept.append(it)
+            continue
+        k = normalize(str(it.get("key", "")))
+        d = normalize(str(it.get("Desc", "")))
+        comp = f"{k}|{d}"
 
-# ----- load -----
+        # compare to all kept signatures
+        is_dup = any(similar(comp, prev) >= threshold for prev in signatures)
+        if is_dup:
+            continue
+        signatures.append(comp)
+        kept.append(it)
+    return kept
+
+# ---------- main ----------
 with open("data.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
-# ----- dedup if list or dict[data] -----
+# 1) Dedupe only when the top-level is a list of objects or { "data": [...] }
 if isinstance(data, list):
-    data = dedup_by_key_desc(data)
+    data = dedup_by_similarity(data, SIM_THRESHOLD)
 elif isinstance(data, dict) and isinstance(data.get("data"), list):
-    data["data"] = dedup_by_key_desc(data["data"])
+    data["data"] = dedup_by_similarity(data["data"], SIM_THRESHOLD)
 
-# ----- remap codes everywhere -----
+# 2) Remap ABC codes everywhere
 updated = walk_remap(data)
 
-# ----- save -----
 with open("data_updated.json", "w", encoding="utf-8") as f:
     json.dump(updated, f, indent=2, ensure_ascii=False)
